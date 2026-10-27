@@ -78,6 +78,22 @@ def state_order_for(industry_index, state_filter=""):
     return ordered[offset:] + ordered[:offset]
 
 
+def classify_search_error(exc):
+    """Classify DDGS errors so an empty query is not mistaken for provider failure."""
+    message = str(exc).lower()
+    if any(marker in message for marker in (
+        "no results found", "no results", "zero results", "results not found",
+    )):
+        return "empty"
+    if any(marker in message for marker in (
+        "rate limit", "ratelimit", "too many requests", "429", "excessive load",
+        "connection error", "timed out", "timeout", "temporarily unavailable",
+        "service unavailable", "502", "503", "504", "server error",
+    )):
+        return "transient"
+    return "unknown"
+
+
 def reject_result(title, body, url):
     """Filter obvious non-business results while preserving uncertain candidates for review."""
     title = (title or "").strip()
@@ -110,6 +126,8 @@ def main():
     rows = []
     seen_hosts = set()
     search_errors = 0
+    empty_searches = 0
+    successful_searches = 0
     try:
         with DDGS() as ddgs:
             for industry_index, (industry, phrases, quota) in enumerate(INDUSTRIES):
@@ -131,14 +149,23 @@ def main():
                     print(f"Searching: {industry} — {state} ({found}/{target})", flush=True)
                     try:
                         results = ddgs.text(query, max_results=8)
+                        successful_searches += 1
                         search_errors = 0
                     except Exception as exc:
+                        error_kind = classify_search_error(exc)
+                        if error_kind == "empty":
+                            empty_searches += 1
+                            search_errors = 0
+                            print(f"  No results for this query; continuing ({empty_searches} empty searches).", flush=True)
+                            time.sleep(args.delay)
+                            continue
                         search_errors += 1
-                        print(f"  Search error ({search_errors}/3): {exc}", flush=True)
+                        print(f"  Search provider error ({search_errors}/3, {error_kind}): {exc}", flush=True)
                         if search_errors >= 3:
-                            print("Search provider is rate-limiting or unavailable; saving partial results.", flush=True)
-                            raise RuntimeError("Search stopped after three consecutive errors") from exc
-                        time.sleep(max(args.delay, 3.0))
+                            print("Search provider appears unavailable or is throttling; saving partial results.", flush=True)
+                            raise RuntimeError("Stopped after three consecutive provider errors") from exc
+                        # Bounded backoff gives a throttled or briefly unavailable provider time to recover.
+                        time.sleep(min(max(args.delay, 3.0) * (2 ** (search_errors - 1)), 15.0))
                         continue
 
                     # One result per query limits repeated results from a single search.
@@ -188,6 +215,7 @@ def main():
         writer = csv.DictWriter(handle, fieldnames=FIELDS)
         writer.writeheader()
         writer.writerows(rows)
+    print(f"Search summary: {successful_searches} successful queries, {empty_searches} empty queries, {search_errors} consecutive provider error(s).", flush=True)
     print(f"Saved {len(rows)} unverified business leads to {args.output}.", flush=True)
     print("Review candidates manually; no unapproved website was crawled.", flush=True)
     if len(rows) < args.limit:
