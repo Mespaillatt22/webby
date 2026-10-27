@@ -32,11 +32,13 @@ BLOCKED_DOMAINS = (
     "hospice.io", "healthcarecomps.com", "medicareproviders.org", "providerdata.com",
     "opencorporates.com", "ratemyhomehealth.com", "seniorcenter.us", "hhadata.com",
     "ehealthscores.com", "careavailability.com", "health.usnews.com", "showmelocal.com",
-    "bing.com", "duckduckgo.com", "google.com", "bing.net",
+    "bing.com", "duckduckgo.com", "google.com", "bing.net", "carerecords.org", "wellness.com",
+    # Business/consumer directories are not official agency sites.
+    "allbiz.com", "families.care",
 )
 CONTACT_TERMS = ("contact", "about", "leadership", "team", "owner", "location")
 BAD_EMAIL_PARTS = ("example.com", "email.com", "sentry.io", "wixpress.com")
-BLOCKED_EMAIL_DOMAINS = ("npino.com", "npiprofile.com", "example.com", "healthcare4ppl.com", "medicarelist.com", "ourhealthnetwork.com", "homecaregrade.com", "homecareatlas.com", "sentry.io", "wixpress.com")
+BLOCKED_EMAIL_DOMAINS = ("carerecords.org", "wellness.com", "npino.com", "npiprofile.com", "example.com", "healthcare4ppl.com", "medicarelist.com", "ourhealthnetwork.com", "homecaregrade.com", "homecareatlas.com", "sentry.io", "wixpress.com")
 LOW_PRIORITY_EMAIL_TERMS = ("media@", "press@", "marketing@", "feedback@", "webmaster@", "noreply@", "no-reply@", "donotreply@", "privacy@", "billing@", "careers@", "jobs@")
 
 
@@ -158,13 +160,10 @@ def find_website(name, city, state):
 
     ranked = sorted(candidates.values(), key=lambda item: (-item["score"], len(item["url"]), item["url"]))
     best = ranked[0]
-    if best["score"] < 5:
-        print(f"  Weak website candidate held for review (score {best['score']}): {best['url']}")
-        return "", "Unverified candidate — manual review", best["url"]
-
-    status = "Likely official — verify before outreach" if best["score"] >= 9 else "Plausible match — manual verification"
-    print(f"  Website candidate ({status}; score {best['score']}): {best['url']}")
-    return best["url"], status, best["url"]
+    # Search relevance ranks candidates only. It never verifies ownership.
+    status = "Unverified candidate — manual approval required"
+    print(f"  Website candidate ({status}; relevance score {best['score']}): {best['url']}")
+    return "", status, best["url"]
 
 def robots_allowed(url, session):
     parsed = urlparse(url)
@@ -256,47 +255,73 @@ def email_score(email, site_host):
     return score
 
 
+def truthy(value):
+    """Accept explicit human approval values from CSV."""
+    return str(value or "").strip().lower() in {"yes", "y", "true", "1", "approved"}
+
+
 def research_agency(agency, session, refresh_websites=False):
     name = (agency.get("Agency Name") or "").strip()
     city = (agency.get("City") or "").strip()
     state = (agency.get("State") or "").strip()
     existing_site = (agency.get("Website") or "").strip()
+    approved = truthy(agency.get("Website Approved"))
+    prior_candidate = (agency.get("Website Candidate for Review") or "").strip()
+    existing_email = (agency.get("Business Email") or "").strip()
+    existing_email_source = (agency.get("Email Source URL") or "").strip()
 
-    candidate_for_review = ""
-    if refresh_websites:
-        website, review_status, candidate_for_review = find_website(name, city, state)
-        website_source = "Fresh search"
-    elif is_candidate_website(existing_site):
+    # Unapproved input emails are preserved for review, not promoted to Business Email.
+    if existing_email and not truthy(agency.get("Email Approved")):
+        agency["Email Candidate for Review"] = existing_email
+        agency["Email Candidate Source URL"] = existing_email_source
+        agency["Business Email"] = ""
+        agency["Email Source URL"] = ""
+    else:
+        agency["Business Email"] = existing_email if truthy(agency.get("Email Approved")) else ""
+        agency["Email Source URL"] = existing_email_source if truthy(agency.get("Email Approved")) else ""
+    agency["Email Quality"] = ""
+    agency["Source"] = agency.get("Source", "") or "CMS Provider Data"
+
+    candidate_for_review = prior_candidate
+    website_source = "Input CSV"
+    website = ""
+
+    if approved and is_candidate_website(existing_site):
         website = existing_site
         candidate_for_review = existing_site
-        review_status = "Existing URL — verify official ownership"
-        website_source = "Input CSV"
+        review_status = "Manually approved for crawling"
+        website_source = "Input CSV — explicit approval"
+    elif refresh_websites or not existing_site:
+        found_site, review_status, discovered_candidate = find_website(name, city, state)
+        candidate_for_review = discovered_candidate or prior_candidate or existing_site
+        website = ""
+        website_source = "Fresh search" if candidate_for_review else "Not found"
     else:
-        website, review_status, candidate_for_review = find_website(name, city, state)
-        website_source = "Fresh search" if website or candidate_for_review else "Not found"
+        candidate_for_review = existing_site
+        review_status = "Unverified candidate — manual approval required"
+        website_source = "Input CSV — not approved"
 
     agency["Website"] = website
     agency["Website Candidate for Review"] = candidate_for_review
     agency["Website Source"] = website_source
     agency["Website Review Status"] = review_status
-    agency["Business Email"] = agency.get("Business Email", "") or ""
-    agency["Email Source URL"] = agency.get("Email Source URL", "") or ""
-    agency["Email Quality"] = ""
-    agency["Source"] = agency.get("Source", "") or "CMS Provider Data"
 
     if not website:
         if candidate_for_review:
-            agency["Contact Search Status"] = "Unverified website candidate held for review"
-            agency["Lead Research Notes"] = "A weak search result was saved in Website Candidate for Review and was not crawled automatically."
+            agency["Contact Search Status"] = "Website candidate held for review; not crawled"
+            agency["Lead Research Notes"] = (
+                "No website was crawled and no scraped email was promoted. Verify the candidate, "
+                "copy its URL into Website, and set Website Approved to YES to allow crawling."
+            )
         else:
             agency["Contact Search Status"] = "Website not found"
-            agency["Lead Research Notes"] = "No suitable non-directory candidate found; manual review may be needed."
+            agency["Lead Research Notes"] = "No candidate found; manual research may be needed."
         return agency
 
     page_result = get_html(website, session)
     if not page_result:
-        agency["Contact Search Status"] = "Website found; homepage unavailable or crawling disallowed"
-        agency["Lead Research Notes"] = "Manually review the candidate website; crawler could not access it under current rules."
+        agency["Contact Search Status"] = "Approved website unavailable or crawling disallowed"
+        agency["Lead Research Notes"] = "Website was explicitly approved, but the homepage could not be accessed under current rules."
         return agency
 
     final_home, home_html = page_result
@@ -313,6 +338,12 @@ def research_agency(agency, session, refresh_websites=False):
 
     found = list(dict.fromkeys(found))
     site_host = normalized_host(final_home)
+    # Only accept addresses hosted on the explicitly approved agency website.
+    found = [
+        item for item in found
+        if normalized_host(item[1]) == site_host
+        and item[0].rsplit("@", 1)[-1] == site_host
+    ]
     found.sort(key=lambda item: (-email_score(item[0], site_host), item[0]))
     usable = [item for item in found if not any(term in item[0] for term in LOW_PRIORITY_EMAIL_TERMS)]
 
@@ -320,17 +351,12 @@ def research_agency(agency, session, refresh_websites=False):
         best_email, source_url = usable[0]
         agency["Business Email"] = best_email
         agency["Email Source URL"] = source_url
-        domain = best_email.rsplit("@", 1)[-1]
-        agency["Email Quality"] = (
-            "Website-domain email candidate"
-            if domain == site_host or domain.endswith("." + site_host)
-            else "Public email candidate; domain differs from website"
-        )
-        agency["Contact Search Status"] = f"Email found ({len(set(email for email, _ in usable))} usable public email(s) detected)"
-        agency["Lead Research Notes"] = "Publicly listed candidate; deliverability and contact role not verified."
+        agency["Email Quality"] = "Public email on manually approved agency website; verify before outreach"
+        agency["Contact Search Status"] = f"Email candidate found ({len(set(email for email, _ in usable))} usable public email(s))"
+        agency["Lead Research Notes"] = "Email was found on a manually approved website; role and deliverability are not verified."
     else:
-        agency["Contact Search Status"] = "Website found; public email not found"
-        agency["Lead Research Notes"] = "No suitable public business email found; manually check the official contact page."
+        agency["Contact Search Status"] = "Approved website; no same-domain public email found"
+        agency["Lead Research Notes"] = "No same-domain public business email found; manually review the official contact page."
     return agency
 
 
@@ -360,7 +386,7 @@ def main():
 
     if args.limit > 0:
         agencies = agencies[:args.limit]
-    extra_fields = ["Website Source", "Website Review Status", "Website Candidate for Review", "Email Source URL", "Email Quality", "Contact Search Status", "Lead Research Notes", "Potential Duplicate"]
+    extra_fields = ["Website Approved", "Website Source", "Website Review Status", "Website Candidate for Review", "Email Approved", "Email Candidate for Review", "Email Candidate Source URL", "Email Source URL", "Email Quality", "Contact Search Status", "Lead Research Notes", "Potential Duplicate"]
     fields = list(dict.fromkeys(original_fields + extra_fields))
     session = requests.Session()
     session.headers.update(HEADERS)
