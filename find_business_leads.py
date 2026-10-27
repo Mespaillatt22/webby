@@ -102,6 +102,15 @@ def reject_result(title, body, url):
     title_lower = re.sub(r"\s+", " ", title.lower())
     if any(term in title_lower for term in NON_BUSINESS_TITLE_TERMS):
         return True
+    # Search engines often return roundup pages that look like individual providers.
+    # Reject list-style titles without blocking a company merely named "Best Plumbing".
+    if re.search(
+        r"^(?:top|best|leading|top[- ]rated)\\b.*\\b(?:contractors?|plumbers?|hvac|electricians?|roofers?|restaurants?|companies|businesses|providers)\\b.*\\b(?:in|near|for)\\b",
+        title_lower,
+    ):
+        return True
+    if re.search(r"\\b(?:directory|ranked|roundup|list of)\\b", title_lower):
+        return True
     if title.count("...") > 1 or title.count("Homepage") > 1:
         return True
     if not re.search(r"[a-zA-Z]{3}", title):
