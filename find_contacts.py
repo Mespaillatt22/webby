@@ -1,143 +1,213 @@
-
+"""Find official agency websites and publicly listed business emails."""
+import argparse
 import csv
 import re
 import time
-from urllib.parse import urlparse, urljoin
+from pathlib import Path
+from urllib.parse import urljoin, urlparse
+from urllib.robotparser import RobotFileParser
 
 import requests
 from bs4 import BeautifulSoup
 from ddgs import DDGS
 
-INPUT_FILE = "home_health_agencies_clean.csv"
-OUTPUT_FILE = "home_health_contacts_test.csv"
-
-# Start small. We can increase this after checking the results.
-TEST_LIMIT = 25
-
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (compatible; PublicBusinessContactResearch/1.0)"
-}
-
-EMAIL_RE = re.compile(
-    r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}",
-    re.IGNORECASE,
+EMAIL_RE = re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.I)
+USER_AGENT = "AgencyContactResearchBot/1.0 (public business contact research)"
+HEADERS = {"User-Agent": USER_AGENT}
+BLOCKED_DOMAINS = (
+    "facebook.com", "linkedin.com", "yelp.com", "mapquest.com",
+    "yellowpages.com", "instagram.com", "youtube.com", "medicare.gov",
+    "cms.gov", "healthgrades.com", "care.com", "bbb.org", "webmd.com",
+    "angi.com", "nextdoor.com", "wikipedia.org",
 )
+CONTACT_TERMS = ("contact", "about", "leadership", "team", "owner", "location")
+BAD_EMAIL_PARTS = ("example.com", "email.com", "sentry.io", "wixpress.com")
+
+
+def normalized_host(url):
+    return (urlparse(url).hostname or "").lower().removeprefix("www.")
+
+
+def is_candidate_website(url):
+    parsed = urlparse(url)
+    host = normalized_host(url)
+    return (
+        parsed.scheme in ("http", "https")
+        and bool(host)
+        and not any(host == d or host.endswith("." + d) for d in BLOCKED_DOMAINS)
+        and not any(host.endswith(suffix) for suffix in (".gov", ".edu"))
+    )
+
 
 def find_website(name, city, state):
-    query = f'"{name}" {city} {state} home health agency official website'
-
+    query = f'"{name}" {city} {state} official website home care agency'
     try:
-        results = DDGS().text(query, max_results=5)
-
+        with DDGS() as search:
+            results = search.text(query, max_results=8)
         for result in results:
-            url = result.get("href", "")
-            host = urlparse(url).netloc.lower()
-
-            if not url.startswith("http"):
-                continue
-
-            # Skip search engines and social/business directory pages.
-            blocked = [
-                "facebook.com", "linkedin.com", "yelp.com",
-                "mapquest.com", "yellowpages.com", "instagram.com",
-                "youtube.com", "medicare.gov", "cms.gov"
-            ]
-
-            if any(domain in host for domain in blocked):
-                continue
-
-            return url
-
-    except Exception as error:
-        print(f"Search issue for {name}: {error}")
-
+            url = result.get("href") or result.get("url") or ""
+            if is_candidate_website(url):
+                return url.split("#")[0]
+    except Exception as exc:
+        print(f"  Search failed: {exc}")
     return ""
 
-def find_public_email(website):
-    if not website:
-        return ""
 
-    pages_to_check = [
-        website,
-        urljoin(website, "/contact"),
-        urljoin(website, "/contact-us"),
-        urljoin(website, "/about"),
-    ]
+def robots_allowed(url, session):
+    parsed = urlparse(url)
+    robots_url = f"{parsed.scheme}://{parsed.netloc}/robots.txt"
+    try:
+        response = session.get(robots_url, timeout=8)
+        if response.status_code == 404:
+            return True
+        if response.ok:
+            parser = RobotFileParser()
+            parser.set_url(robots_url)
+            parser.parse(response.text.splitlines())
+            return parser.can_fetch(USER_AGENT, url)
+    except requests.RequestException:
+        pass
+    return False
 
-    for page in pages_to_check:
-        try:
-            response = requests.get(
-                page, headers=HEADERS, timeout=12
-            )
 
-            if response.status_code != 200:
-                continue
+def get_html(url, session):
+    if not is_candidate_website(url) or not robots_allowed(url, session):
+        return None
+    try:
+        response = session.get(url, timeout=12, allow_redirects=True)
+        if response.status_code != 200:
+            return None
+        if "text/html" not in response.headers.get("Content-Type", "").lower():
+            return None
+        if not is_candidate_website(response.url):
+            return None
+        return response.url, response.text
+    except requests.RequestException:
+        return None
 
-            content_type = response.headers.get("Content-Type", "")
-            if "text/html" not in content_type.lower():
-                continue
 
-            soup = BeautifulSoup(response.text, "html.parser")
-            text = soup.get_text(" ", strip=True)
-
-            emails = set(EMAIL_RE.findall(response.text))
-            emails.update(EMAIL_RE.findall(text))
-
-            # Remove common image/file extensions and obvious fake examples.
-            emails = {
-                email.strip(".,;:()[]{}<>").lower()
-                for email in emails
-                if not email.lower().endswith(
-                    (".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg")
-                )
-                and "example.com" not in email.lower()
-                and "email.com" not in email.lower()
-            }
-
-            if emails:
-                return sorted(emails)[0]
-
-        except requests.RequestException:
+def extract_emails(html):
+    soup = BeautifulSoup(html, "html.parser")
+    candidates = set(EMAIL_RE.findall(html))
+    candidates.update(EMAIL_RE.findall(soup.get_text(" ", strip=True)))
+    clean = set()
+    for email in candidates:
+        email = email.strip(".,;:()[]{}<>").lower()
+        if any(bad in email for bad in BAD_EMAIL_PARTS):
             continue
+        if email.endswith((".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".css", ".js")):
+            continue
+        if len(email) <= 254 and ".." not in email:
+            clean.add(email)
+    return sorted(clean)
 
-        time.sleep(0.5)
 
-    return ""
+def contact_pages(home_url, html, max_pages=5):
+    soup = BeautifulSoup(html, "html.parser")
+    pages = [home_url]
+    base_host = normalized_host(home_url)
+    for link in soup.find_all("a", href=True):
+        label = (link.get_text(" ", strip=True) + " " + link.get("href", "")).lower()
+        if not any(term in label for term in CONTACT_TERMS):
+            continue
+        candidate = urljoin(home_url, link["href"].strip())
+        if is_candidate_website(candidate) and normalized_host(candidate) == base_host:
+            if candidate not in pages:
+                pages.append(candidate)
+        if len(pages) >= max_pages:
+            break
+    return pages
 
-with open(INPUT_FILE, encoding="utf-8-sig", newline="") as file:
-    reader = csv.DictReader(file)
-    agencies = list(reader)[:TEST_LIMIT]
 
-output_fields = list(agencies[0].keys()) + [
-    "Contact Search Status"
-] if agencies else []
+def research_agency(agency, session):
+    name = (agency.get("Agency Name") or "").strip()
+    city = (agency.get("City") or "").strip()
+    state = (agency.get("State") or "").strip()
+    existing_site = (agency.get("Website") or "").strip()
+    website = existing_site if is_candidate_website(existing_site) else find_website(name, city, state)
+    agency["Website"] = website
+    agency["Business Email"] = agency.get("Business Email", "") or ""
+    agency["Email Source URL"] = agency.get("Email Source URL", "") or ""
+    agency["Source"] = agency.get("Source", "") or "CMS Provider Data"
 
-with open(OUTPUT_FILE, "w", encoding="utf-8-sig", newline="") as file:
-    writer = csv.DictWriter(file, fieldnames=output_fields)
-    writer.writeheader()
+    if not website:
+        agency["Contact Search Status"] = "Website not found"
+        return agency
 
-    for number, agency in enumerate(agencies, start=1):
-        name = agency.get("Agency Name", "").strip()
-        city = agency.get("City", "").strip()
-        state = agency.get("State", "").strip()
+    page_result = get_html(website, session)
+    if not page_result:
+        agency["Contact Search Status"] = "Website found; homepage unavailable or crawling disallowed"
+        return agency
 
-        print(f"{number}/{len(agencies)} Searching: {name}")
+    final_home, home_html = page_result
+    agency["Website"] = final_home
+    found = []
+    for page_url in contact_pages(final_home, home_html):
+        result = get_html(page_url, session)
+        if not result:
+            continue
+        final_url, html = result
+        for email in extract_emails(html):
+            found.append((email, final_url))
+        time.sleep(0.4)
 
-        website = find_website(name, city, state)
+    preferred = ("info@", "contact@", "office@", "hello@", "admin@", "inquiries@", "enquiries@")
+    found = list(dict.fromkeys(found))
+    found.sort(key=lambda item: (
+        0 if item[0].startswith(preferred) else 1,
+        1 if any(x in item[0] for x in ("noreply@", "no-reply@", "donotreply@")) else 0,
+        item[0],
+    ))
+    if found:
+        agency["Business Email"] = found[0][0]
+        agency["Email Source URL"] = found[0][1]
+        agency["Contact Search Status"] = f"Email found ({len(set(e for e, _ in found))} public email(s) detected)"
+    else:
+        agency["Contact Search Status"] = "Website found; public email not found"
+    return agency
 
-        if website:
-            email = find_public_email(website)
-            agency["Website"] = website
-            agency["Business Email"] = email
-            agency["Contact Search Status"] = (
-                "Website found; email found"
-                if email else "Website found; email not found"
-            )
-        else:
-            agency["Contact Search Status"] = "Website not found"
 
-        writer.writerow(agency)
-        time.sleep(2)
+def main():
+    parser = argparse.ArgumentParser(description="Find official agency websites and public business emails.")
+    parser.add_argument("--input", default="home_health_agencies_clean.csv")
+    parser.add_argument("--output", default="home_health_contacts.csv")
+    parser.add_argument("--limit", type=int, default=25, help="Maximum rows to process; use 0 for all rows.")
+    parser.add_argument("--delay", type=float, default=1.5, help="Delay between agencies in seconds.")
+    args = parser.parse_args()
 
-print(f"\nFinished. Results saved to {OUTPUT_FILE}")
-print("Please review the websites and emails before using them.")
+    input_path = Path(args.input)
+    output_path = Path(args.output)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with input_path.open("r", encoding="utf-8-sig", newline="") as f:
+        reader = csv.DictReader(f)
+        agencies = list(reader)
+        original_fields = reader.fieldnames or []
+
+    if args.limit > 0:
+        agencies = agencies[:args.limit]
+    fields = list(dict.fromkeys(original_fields + ["Email Source URL", "Contact Search Status"]))
+    session = requests.Session()
+    session.headers.update(HEADERS)
+
+    with output_path.open("w", encoding="utf-8-sig", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fields, extrasaction="ignore")
+        writer.writeheader()
+        for i, agency in enumerate(agencies, start=1):
+            print(f"[{i}/{len(agencies)}] {agency.get('Agency Name', '')}")
+            try:
+                result = research_agency(agency, session)
+            except Exception as exc:
+                result = agency
+                result["Contact Search Status"] = f"Error: {type(exc).__name__}"
+                print(f"  Error: {exc}")
+            writer.writerow(result)
+            f.flush()
+            time.sleep(max(0, args.delay))
+
+    print(f"Finished. Processed {len(agencies)} agencies. Output: {output_path}")
+    print("Review website and email evidence before contacting leads.")
+
+
+if __name__ == "__main__":
+    main()
