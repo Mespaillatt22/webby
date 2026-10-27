@@ -24,6 +24,33 @@ class BusinessLeadDiscoveryTests(unittest.TestCase):
             "Alabama Restaurant Association", "Membership information",
             "https://example.org/association"))
 
+    def test_roundup_pages_are_rejected(self):
+        self.assertTrue(leads.reject_result(
+            "Top Plumbing Contractors in Montana | USA Plumber",
+            "A list of plumbing contractors in Montana",
+            "https://example.com/top-plumbing-contractors"))
+        self.assertTrue(leads.reject_result(
+            "Best HVAC Contractors in Maryland", "Top rated providers",
+            "https://example.com/best-hvac-contractors"))
+
+    def test_category_listing_and_license_pages_are_rejected(self):
+        examples = [
+            ("Plumbers in Montana | 212 Verified Listings ...", "https://example.com/listings"),
+            ("Plumbers in Idaho: License Rules & Local Listings", "https://example.com/rules"),
+            ("License Lookup - Virginia Interactive", "https://example.com/license"),
+            ("Find Plumbing Contractors in New Jersey - Procore", "https://example.com/find"),
+            ("Kentucky Plumbing License - License Lookup", "https://example.com/lookup"),
+        ]
+        for title, url in examples:
+            with self.subTest(title=title):
+                self.assertTrue(leads.reject_result(title, "provider information", url))
+
+    def test_search_errors_are_classified_correctly(self):
+        self.assertEqual(leads.classify_search_error(Exception("No results found.")), "empty")
+        self.assertEqual(leads.classify_search_error(Exception("429 Too Many Requests")), "transient")
+        self.assertEqual(leads.classify_search_error(Exception("connection error detected")), "transient")
+        self.assertEqual(leads.classify_search_error(Exception("unexpected parser issue")), "unknown")
+
     def test_trade_business_result_can_pass_filters(self):
         self.assertFalse(leads.reject_result(
             "Arid Valley Plumbing", "Residential plumbing in Phoenix",
@@ -55,6 +82,33 @@ class BusinessLeadDiscoveryTests(unittest.TestCase):
         self.assertTrue(row["Email Candidate for Review"])
         self.assertEqual(row["Website"], "")
         self.assertEqual(row["Website Approved"], "NO")
+
+
+    def test_public_contact_extraction_finds_published_email_phone_and_labelled_name(self):
+        html = """
+        <html><body>
+          <p>Owner: Jane Smith</p>
+          <a href="mailto:info@example.com">info@example.com</a>
+          <a href="tel:+1-212-555-0198">(212) 555-0198</a>
+          <p>Office phone: 212-555-0198</p>
+        </body></html>
+        """
+        emails, phones, names = leads.extract_public_contacts(html)
+        self.assertIn("info@example.com", emails)
+        self.assertTrue(any("212" in phone and "555" in phone for phone in phones))
+        self.assertIn("Jane Smith", names)
+
+    def test_contact_pages_stay_on_same_host(self):
+        html = """
+        <html><body>
+          <a href="/contact">Contact</a>
+          <a href="https://other.example/about">About us</a>
+        </body></html>
+        """
+        pages = leads.contact_pages("https://company.example/", html)
+        self.assertIn("https://company.example/", pages)
+        self.assertIn("https://company.example/contact", pages)
+        self.assertFalse(any("other.example" in page for page in pages))
 
 
 if __name__ == "__main__":

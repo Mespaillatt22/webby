@@ -1,15 +1,18 @@
-"""Discover candidate small-business leads across industries.
+"""Discover small-business leads and extract public contacts from approved sites.
 
-Search results are unverified research leads. This script does not crawl
-candidate websites and does not treat search-result emails as approved contacts.
+Search results are unverified research leads. Candidate websites are not crawled
+unless the user explicitly approves the website in the input CSV.
 """
 import argparse
 import csv
 import random
 import re
 import time
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
+from urllib.robotparser import RobotFileParser
 
+import requests
+from bs4 import BeautifulSoup
 from ddgs import DDGS
 
 INDUSTRIES = [
@@ -49,11 +52,17 @@ NON_BUSINESS_TITLE_TERMS = (
     "membership", "get involved", "tax credits", "research us manufacturers",
 )
 EMAIL_RE = re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.I)
+PHONE_RE = re.compile(r"(?<!\w)(?:\+?1[ .-]?)?(?:\(?\d{3}\)?[ .-]?)\d{3}[ .-]?\d{4}(?!\w)")
+USER_AGENT = "BusinessContactResearchBot/1.0 (public business contact research)"
+HEADERS = {"User-Agent": USER_AGENT}
+CONTACT_TERMS = ("contact", "about", "team", "leadership", "staff", "owner", "management")
 FIELDS = [
     "Business Name", "Industry", "City", "State", "Search State",
     "Website", "Website Candidate for Review", "Website Approved",
+    "First Name", "Last Name", "Contact Name Candidate", "Contact Name Source URL",
     "Business Email", "Email Candidate for Review", "Email Candidate Source URL",
-    "Phone", "Lead Source URL", "Search Evidence", "Lead Status", "Review Notes",
+    "Phone", "Phone Candidate for Review", "Phone Source URL",
+    "Lead Source URL", "Search Evidence", "Lead Status", "Review Notes",
 ]
 
 
@@ -78,6 +87,22 @@ def state_order_for(industry_index, state_filter=""):
     return ordered[offset:] + ordered[:offset]
 
 
+def classify_search_error(exc):
+    """Classify DDGS errors so an empty query is not mistaken for provider failure."""
+    message = str(exc).lower()
+    if any(marker in message for marker in (
+        "no results found", "no results", "zero results", "results not found",
+    )):
+        return "empty"
+    if any(marker in message for marker in (
+        "rate limit", "ratelimit", "too many requests", "429", "excessive load",
+        "connection error", "timed out", "timeout", "temporarily unavailable",
+        "service unavailable", "502", "503", "504", "server error",
+    )):
+        return "transient"
+    return "unknown"
+
+
 def reject_result(title, body, url):
     """Filter obvious non-business results while preserving uncertain candidates for review."""
     title = (title or "").strip()
@@ -86,6 +111,25 @@ def reject_result(title, body, url):
     title_lower = re.sub(r"\s+", " ", title.lower())
     if any(term in title_lower for term in NON_BUSINESS_TITLE_TERMS):
         return True
+    # Search engines often return roundup pages that look like individual providers.
+    # Reject list-style titles without blocking a company merely named "Best Plumbing".
+    if re.search(
+        r"^(?:top|best|leading|top[- ]rated)\b.*\b(?:contractors?|plumbers?|hvac|electricians?|roofers?|restaurants?|companies|businesses|providers)\b.*\b(?:in|near|for)\b",
+        title_lower,
+    ):
+        return True
+    if re.search(r"\b(?:directory|ranked|roundup|list of|license lookup|license rules|local listings|verified listings|business listings)\b", title_lower):
+        return True
+    # Generic location-led category pages are usually directories, not a single business.
+    if re.match(
+        r"^(?:plumbers?|plumbing contractors?|hvac contractors?|electricians?|roofers?|general contractors?|restaurants?|auto repair shops?)\s+in\s+",
+        title_lower,
+    ):
+        return True
+    if re.match(r"^(?:find|search)\s+(?:plumbing|hvac|electrical|roofing|general)\s+(?:contractors?|companies|services)\s+in\s+", title_lower):
+        return True
+    if re.search(r"\blicen[cs]e\s+(?:lookup|rules|requirements|search)\b", title_lower):
+        return True
     if title.count("...") > 1 or title.count("Homepage") > 1:
         return True
     if not re.search(r"[a-zA-Z]{3}", title):
@@ -93,9 +137,157 @@ def reject_result(title, body, url):
     return False
 
 
+
+def robots_allowed(url, session):
+    """Check robots.txt before requesting a public page."""
+    parsed = urlparse(url)
+    robots_url = f"{parsed.scheme}://{parsed.netloc}/robots.txt"
+    try:
+        response = session.get(robots_url, timeout=8)
+        if response.status_code == 404:
+            return True
+        if response.ok:
+            parser = RobotFileParser()
+            parser.set_url(robots_url)
+            parser.parse(response.text.splitlines())
+            return parser.can_fetch(USER_AGENT, url)
+    except requests.RequestException:
+        return False
+    return False
+
+
+def fetch_html(url, session):
+    if not url.startswith(("http://", "https://")) or blocked(url):
+        return None
+    if not robots_allowed(url, session):
+        return None
+    try:
+        response = session.get(url, timeout=12, allow_redirects=True)
+        if response.status_code != 200:
+            return None
+        if "text/html" not in response.headers.get("Content-Type", "").lower():
+            return None
+        if blocked(response.url) or host_of(response.url) != host_of(url):
+            # Do not follow redirects onto a different host that was not approved.
+            return None
+        return response.url, response.text
+    except requests.RequestException:
+        return None
+
+
+def contact_pages(home_url, html, max_pages=8):
+    soup = BeautifulSoup(html, "html.parser")
+    pages = [home_url]
+    base_host = host_of(home_url)
+    for link in soup.find_all("a", href=True):
+        label = (link.get_text(" ", strip=True) + " " + link.get("href", "")).lower()
+        if not any(term in label for term in CONTACT_TERMS):
+            continue
+        candidate = urljoin(home_url, link["href"].strip())
+        if (urlparse(candidate).scheme in ("http", "https")
+                and host_of(candidate) == base_host and candidate not in pages):
+            pages.append(candidate)
+        if len(pages) >= max_pages:
+            break
+    return pages
+
+
+def extract_public_contacts(html):
+    """Extract published business emails, phone numbers, and explicitly labelled names."""
+    soup = BeautifulSoup(html, "html.parser")
+    visible_text = soup.get_text(" ", strip=True)
+    emails = set(EMAIL_RE.findall(html))
+    emails.update(EMAIL_RE.findall(visible_text))
+    emails = sorted({
+        value.strip(".,;:()[]{}<>").lower()
+        for value in emails
+        if len(value) <= 254 and ".." not in value
+        and not value.lower().endswith((".png", ".jpg", ".jpeg", ".gif", ".svg", ".css", ".js"))
+    })
+
+    phones = []
+    for link in soup.select('a[href^="tel:"]'):
+        raw = link.get("href", "")[4:].strip()
+        if len(re.sub(r"\D", "", raw)) in (10, 11):
+            phones.append(link.get_text(" ", strip=True) or raw)
+    for value in PHONE_RE.findall(visible_text):
+        if len(re.sub(r"\D", "", value)) in (10, 11):
+            phones.append(value.strip())
+    clean_phones, seen = [], set()
+    for value in phones:
+        digits = re.sub(r"\D", "", value)
+        if digits.startswith("1") and len(digits) == 11:
+            digits = digits[1:]
+        if len(digits) == 10 and digits not in seen:
+            seen.add(digits)
+            clean_phones.append(value)
+
+    names = []
+    patterns = [
+        r"(?i)\b(?:owner|founder|president|ceo|director|manager|contact person)\s*[:\-–]\s*([A-Z][a-zA-Z'’-]+\s+[A-Z][a-zA-Z'’-]+)\b",
+        r"(?i)\bcontact\s+([A-Z][a-zA-Z'’-]+\s+[A-Z][a-zA-Z'’-]+)\b",
+    ]
+    for tag in soup.find_all(["a", "h1", "h2", "h3", "p", "span", "div"]):
+        label = tag.get_text(" ", strip=True)
+        if len(label) > 120:
+            continue
+        for pattern in patterns:
+            match = re.search(pattern, label)
+            if match:
+                name = match.group(1).strip()
+                if name.lower() not in {"customer service", "general manager"}:
+                    names.append(name)
+    return emails, clean_phones, list(dict.fromkeys(names))
+
+
+def crawl_approved_website(website, session, delay=0.5):
+    """Crawl an explicitly approved company website and same-domain contact pages."""
+    homepage = fetch_html(website, session)
+    if not homepage:
+        return {"status": "Approved website unavailable or crawling disallowed"}
+    final_home, home_html = homepage
+    email_sources, phone_sources, name_sources = {}, {}, {}
+    emails, phones, names = [], [], []
+    for page_url in contact_pages(final_home, home_html, max_pages=8):
+        page = fetch_html(page_url, session)
+        if page:
+            final_url, html = page
+            found_emails, found_phones, found_names = extract_public_contacts(html)
+            for value in found_emails:
+                email_sources.setdefault(value, final_url)
+                emails.append(value)
+            for value in found_phones:
+                phone_sources.setdefault(value, final_url)
+                phones.append(value)
+            for value in found_names:
+                name_sources.setdefault(value, final_url)
+                names.append(value)
+            time.sleep(delay)
+    host = host_of(final_home)
+    emails = list(dict.fromkeys(emails))
+    emails.sort(key=lambda value: (
+        0 if value.rsplit("@", 1)[-1] == host else 1,
+        0 if value.split("@", 1)[0].lower() in {"info", "contact", "office", "hello", "sales", "inquiries"} else 1,
+        value,
+    ))
+    email = emails[0] if emails else ""
+    phone = list(dict.fromkeys(phones))
+    name = list(dict.fromkeys(names))
+    return {
+        "status": "Public contact pages reviewed",
+        "website": final_home,
+        "email": email,
+        "email_source": email_sources.get(email, ""),
+        "phone": phone[0] if phone else "",
+        "phone_source": phone_sources.get(phone[0], "") if phone else "",
+        "name": name[0] if name else "",
+        "name_source": name_sources.get(name[0], "") if name else "",
+    }
+
 def main():
     parser = argparse.ArgumentParser(description="Discover small-business leads across industries.")
     parser.add_argument("--output", default="general_business_leads_100.csv")
+    parser.add_argument("--input", default="", help="Optional existing leads CSV; crawls only rows with Website Approved=YES.")
     parser.add_argument("--limit", type=int, default=100, help="Maximum leads to collect (default: 100).")
     parser.add_argument("--state", default="", help="Optional state filter; omit for a multi-state U.S. pilot.")
     parser.add_argument("--delay", type=float, default=2.5, help="Delay between search requests in seconds (default: 2.5).")
@@ -107,9 +299,56 @@ def main():
     if args.delay < 1:
         parser.error("--delay must be at least 1 second to reduce search-provider throttling")
 
+    if args.input:
+        session = requests.Session()
+        session.headers.update(HEADERS)
+        with open(args.input, "r", newline="", encoding="utf-8-sig") as source:
+            reader = csv.DictReader(source)
+            input_rows = list(reader)
+            input_fields = reader.fieldnames or []
+        if args.limit > 0:
+            input_rows = input_rows[:args.limit]
+        output_fields = list(dict.fromkeys(input_fields + FIELDS))
+        with open(args.output, "w", newline="", encoding="utf-8-sig") as handle:
+            writer = csv.DictWriter(handle, fieldnames=output_fields, extrasaction="ignore")
+            writer.writeheader()
+            for index, row in enumerate(input_rows, start=1):
+                approved = str(row.get("Website Approved", "")).strip().lower() in {"yes", "y", "true", "1", "approved"}
+                website = (row.get("Website") or "").strip()
+                if not approved or not website.startswith(("http://", "https://")):
+                    row["Lead Status"] = "Website candidate held for review; not crawled"
+                    row["Review Notes"] = "Review the official company URL, put it in Website, and set Website Approved=YES before contact-page crawling."
+                else:
+                    print(f"[{index}/{len(input_rows)}] Crawling approved site: {website}", flush=True)
+                    details = crawl_approved_website(website, session)
+                    row["Website"] = details.get("website", website)
+                    row["Lead Status"] = details.get("status", "Crawl completed")
+                    if details.get("email"):
+                        row["Business Email"] = details["email"]
+                        row["Email Candidate for Review"] = details["email"]
+                        row["Email Candidate Source URL"] = details["email_source"]
+                    if details.get("phone"):
+                        row["Phone"] = details["phone"]
+                        row["Phone Candidate for Review"] = details["phone"]
+                        row["Phone Source URL"] = details["phone_source"]
+                    if details.get("name"):
+                        parts = details["name"].split()
+                        row["First Name"] = parts[0]
+                        row["Last Name"] = " ".join(parts[1:])
+                        row["Contact Name Candidate"] = details["name"]
+                        row["Contact Name Source URL"] = details["name_source"]
+                    row["Review Notes"] = "Public details extracted from the manually approved website; verify the contact role and accuracy before outreach."
+                writer.writerow(row)
+                handle.flush()
+                time.sleep(args.delay)
+        print(f"Processed {len(input_rows)} input rows; saved contacts to {args.output}.", flush=True)
+        return
+
     rows = []
     seen_hosts = set()
     search_errors = 0
+    empty_searches = 0
+    successful_searches = 0
     try:
         with DDGS() as ddgs:
             for industry_index, (industry, phrases, quota) in enumerate(INDUSTRIES):
@@ -131,14 +370,23 @@ def main():
                     print(f"Searching: {industry} — {state} ({found}/{target})", flush=True)
                     try:
                         results = ddgs.text(query, max_results=8)
+                        successful_searches += 1
                         search_errors = 0
                     except Exception as exc:
+                        error_kind = classify_search_error(exc)
+                        if error_kind == "empty":
+                            empty_searches += 1
+                            search_errors = 0
+                            print(f"  No results for this query; continuing ({empty_searches} empty searches).", flush=True)
+                            time.sleep(args.delay)
+                            continue
                         search_errors += 1
-                        print(f"  Search error ({search_errors}/3): {exc}", flush=True)
+                        print(f"  Search provider error ({search_errors}/3, {error_kind}): {exc}", flush=True)
                         if search_errors >= 3:
-                            print("Search provider is rate-limiting or unavailable; saving partial results.", flush=True)
-                            raise RuntimeError("Search stopped after three consecutive errors") from exc
-                        time.sleep(max(args.delay, 3.0))
+                            print("Search provider appears unavailable or is throttling; saving partial results.", flush=True)
+                            raise RuntimeError("Stopped after three consecutive provider errors") from exc
+                        # Bounded backoff gives a throttled or briefly unavailable provider time to recover.
+                        time.sleep(min(max(args.delay, 3.0) * (2 ** (search_errors - 1)), 15.0))
                         continue
 
                     # One result per query limits repeated results from a single search.
@@ -164,17 +412,24 @@ def main():
                             "Website": "",
                             "Website Candidate for Review": url,
                             "Website Approved": "NO",
+                            "First Name": "",
+                            "Last Name": "",
+                            "Contact Name Candidate": "",
+                            "Contact Name Source URL": "",
                             "Business Email": "",
                             "Email Candidate for Review": email_candidate,
                             "Email Candidate Source URL": url if email_candidate else "",
                             "Phone": "",
+                            "Phone Candidate for Review": "",
+                            "Phone Source URL": "",
                             "Lead Source URL": url,
                             "Search Evidence": body.strip(),
                             "Lead Status": "Unverified search result — manual review required",
                             "Review Notes": (
                                 "Search location is a query hint, not a verified business address. "
-                                "Confirm the business, city/state, official website, email and relevance "
-                                "before outreach. Search-result email is a candidate, not a verified contact."
+                                "Confirm the business, city/state and official website. To extract public "
+                                "contacts, review the candidate URL, copy it into Website, and set "
+                                "Website Approved=YES. Search-result contact details remain candidates."
                             ),
                         })
                         found += 1
@@ -188,8 +443,9 @@ def main():
         writer = csv.DictWriter(handle, fieldnames=FIELDS)
         writer.writeheader()
         writer.writerows(rows)
+    print(f"Search summary: {successful_searches} successful queries, {empty_searches} empty queries, {search_errors} consecutive provider error(s).", flush=True)
     print(f"Saved {len(rows)} unverified business leads to {args.output}.", flush=True)
-    print("Review candidates manually; no unapproved website was crawled.", flush=True)
+    print("Review candidates manually; no unapproved website was crawled. Use --input on an approved CSV to extract public contacts.", flush=True)
     if len(rows) < args.limit:
         print("Fewer than the requested limit were found. Do not treat the row count as a quality score.", flush=True)
 

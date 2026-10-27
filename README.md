@@ -48,7 +48,13 @@ Limit the pilot to one state if useful:
 
     python find_business_leads.py --limit 100 --state Pennsylvania --delay 2.5 --output output/pennsylvania_business_leads_100.csv
 
-The script rotates through U.S. states for its multi-state pilot and searches public web results. It filters known directory, government, association, and informational pages, and takes at most one result from each search query to improve geographic spread. Filtering is heuristic and cannot identify every irrelevant result. Results are **unverified candidates**, not confirmed businesses or sale opportunities. The `Search State` field records the location used in the query; it is not proof of the business's actual location. The script leaves approved website and business-email fields blank, does not crawl unapproved websites, and puts any email visible in the search-result snippet into `Email Candidate for Review` with its source URL. Review the website, email, business identity, location, and relevance manually before outreach. Search results may include irrelevant listings or return fewer than the requested number.
+The script rotates through U.S. states for its multi-state pilot and searches public web results. It filters known directory, government, association, and informational pages, and takes at most one result from each search query to improve geographic spread. Filtering is heuristic and cannot identify every irrelevant result. Results are **unverified candidates**, not confirmed businesses or sale opportunities. The `Search State` field records the location used in the query; it is not proof of the business's actual location. The discovery run does not crawl candidate websites. It leaves approved website, first/last name, business email, and phone fields blank unless sourced through the approved-site contact workflow, and puts any email visible in the search-result snippet into `Email Candidate for Review` with its source URL.
+
+To crawl contact pages for reviewed websites, first open the discovery CSV and, for each site you have confirmed is the company's official website, copy the URL from `Website Candidate for Review` into `Website` and change `Website Approved` to `YES`. Then run:
+    
+    python find_business_leads.py --input output/general_business_leads_100.csv --limit 25 --delay 2.5 --output output/general_business_contacts_test.csv
+
+The contact pass only visits rows with `Website Approved=YES`, checks `robots.txt`, stays on the approved site's host, and checks the homepage plus relevant same-host Contact/About/Team/Leadership pages. It extracts published email addresses, phone numbers, and clearly labelled person names when found, and records a source URL for each selected contact. It does not guess missing information or verify email deliverability. Review the output and the sources before outreach. Search results may include irrelevant listings or return fewer than the requested number.
 
 ## Key output fields
 
