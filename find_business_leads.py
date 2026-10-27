@@ -5,6 +5,7 @@ candidate websites and does not treat search-result emails as approved contacts.
 """
 import argparse
 import csv
+import random
 import re
 import time
 from urllib.parse import urlparse
@@ -67,16 +68,24 @@ def blocked(url):
     return any(host == domain or host.endswith("." + domain) for domain in BLOCKED_DOMAINS)
 
 
+def state_order_for(industry_index, state_filter=""):
+    """Return a repeatable nationwide state order, rotated for each industry."""
+    if state_filter:
+        return [state_filter.title()]
+    ordered = STATES.copy()
+    random.Random(42).shuffle(ordered)
+    offset = (industry_index * 7) % len(ordered)
+    return ordered[offset:] + ordered[:offset]
+
+
 def reject_result(title, body, url):
     """Filter obvious non-business results while preserving uncertain candidates for review."""
     title = (title or "").strip()
-    body = (body or "").strip()
     if not title or len(title) > 150 or not url or blocked(url):
         return True
     title_lower = re.sub(r"\s+", " ", title.lower())
     if any(term in title_lower for term in NON_BUSINESS_TITLE_TERMS):
         return True
-    # Search providers sometimes concatenate unrelated result titles into one title.
     if title.count("...") > 1 or title.count("Homepage") > 1:
         return True
     if not re.search(r"[a-zA-Z]{3}", title):
@@ -95,19 +104,20 @@ def main():
         parser.error("--limit must be at least 1")
     if args.state and args.state.title() not in STATES:
         parser.error("--state must be a U.S. state name, such as Pennsylvania")
+    if args.delay < 1:
+        parser.error("--delay must be at least 1 second to reduce search-provider throttling")
 
     rows = []
     seen_hosts = set()
     search_errors = 0
     try:
         with DDGS() as ddgs:
-            for industry, phrases, quota in INDUSTRIES:
+            for industry_index, (industry, phrases, quota) in enumerate(INDUSTRIES):
                 target = min(quota, max(0, args.limit - len(rows)))
                 if target <= 0:
                     break
                 found = 0
-                state_list = [args.state.title()] if args.state else STATES
-                # One lead per search request keeps the list geographically broader.
+                state_list = state_order_for(industry_index, args.state)
                 max_attempts = len(state_list) * len(phrases)
                 for attempt in range(max_attempts):
                     if found >= target or len(rows) >= args.limit:
@@ -131,7 +141,7 @@ def main():
                         time.sleep(max(args.delay, 3.0))
                         continue
 
-                    # Only accept one result per query to avoid one state dominating the output.
+                    # One result per query limits repeated results from a single search.
                     for result in results or []:
                         url = (result.get("href") or result.get("url") or "").split("#")[0].strip()
                         title = result.get("title") or ""
