@@ -109,7 +109,17 @@ def reject_result(title, body, url):
         title_lower,
     ):
         return True
-    if re.search(r"\b(?:directory|ranked|roundup|list of)\b", title_lower):
+    if re.search(r"\b(?:directory|ranked|roundup|list of|license lookup|license rules|local listings|verified listings|business listings)\b", title_lower):
+        return True
+    # Generic location-led category pages are usually directories, not a single business.
+    if re.match(
+        r"^(?:plumbers?|plumbing contractors?|hvac contractors?|electricians?|roofers?|general contractors?|restaurants?|auto repair shops?)\s+in\s+",
+        title_lower,
+    ):
+        return True
+    if re.match(r"^(?:find|search)\s+(?:plumbing|hvac|electrical|roofing|general)\s+(?:contractors?|companies|services)\s+in\s+", title_lower):
+        return True
+    if re.search(r"\blicen[cs]e\s+(?:lookup|rules|requirements|search)\b", title_lower):
         return True
     if title.count("...") > 1 or title.count("Homepage") > 1:
         return True
