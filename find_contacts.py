@@ -33,6 +33,8 @@ BLOCKED_DOMAINS = (
     "opencorporates.com", "ratemyhomehealth.com", "seniorcenter.us", "hhadata.com",
     "ehealthscores.com", "careavailability.com", "health.usnews.com", "showmelocal.com",
     "bing.com", "duckduckgo.com", "google.com", "bing.net", "carerecords.org", "wellness.com",
+    # Business/consumer directories are not official agency sites.
+    "allbiz.com", "families.care",
 )
 CONTACT_TERMS = ("contact", "about", "leadership", "team", "owner", "location")
 BAD_EMAIL_PARTS = ("example.com", "email.com", "sentry.io", "wixpress.com")
