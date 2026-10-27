@@ -32,11 +32,11 @@ BLOCKED_DOMAINS = (
     "hospice.io", "healthcarecomps.com", "medicareproviders.org", "providerdata.com",
     "opencorporates.com", "ratemyhomehealth.com", "seniorcenter.us", "hhadata.com",
     "ehealthscores.com", "careavailability.com", "health.usnews.com", "showmelocal.com",
-    "bing.com", "duckduckgo.com", "google.com", "bing.net",
+    "bing.com", "duckduckgo.com", "google.com", "bing.net", "carerecords.org", "wellness.com",
 )
 CONTACT_TERMS = ("contact", "about", "leadership", "team", "owner", "location")
 BAD_EMAIL_PARTS = ("example.com", "email.com", "sentry.io", "wixpress.com")
-BLOCKED_EMAIL_DOMAINS = ("npino.com", "npiprofile.com", "example.com", "healthcare4ppl.com", "medicarelist.com", "ourhealthnetwork.com", "homecaregrade.com", "homecareatlas.com", "sentry.io", "wixpress.com")
+BLOCKED_EMAIL_DOMAINS = ("carerecords.org", "wellness.com", "npino.com", "npiprofile.com", "example.com", "healthcare4ppl.com", "medicarelist.com", "ourhealthnetwork.com", "homecaregrade.com", "homecareatlas.com", "sentry.io", "wixpress.com")
 LOW_PRIORITY_EMAIL_TERMS = ("media@", "press@", "marketing@", "feedback@", "webmaster@", "noreply@", "no-reply@", "donotreply@", "privacy@", "billing@", "careers@", "jobs@")
 
 
