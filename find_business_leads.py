@@ -167,7 +167,8 @@ def fetch_html(url, session):
             return None
         if "text/html" not in response.headers.get("Content-Type", "").lower():
             return None
-        if blocked(response.url):
+        if blocked(response.url) or host_of(response.url) != host_of(url):
+            # Do not follow redirects onto a different host that was not approved.
             return None
         return response.url, response.text
     except requests.RequestException:
