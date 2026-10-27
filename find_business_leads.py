@@ -298,6 +298,51 @@ def main():
     if args.delay < 1:
         parser.error("--delay must be at least 1 second to reduce search-provider throttling")
 
+    if args.input:
+        session = requests.Session()
+        session.headers.update(HEADERS)
+        with open(args.input, "r", newline="", encoding="utf-8-sig") as source:
+            reader = csv.DictReader(source)
+            input_rows = list(reader)
+            input_fields = reader.fieldnames or []
+        if args.limit > 0:
+            input_rows = input_rows[:args.limit]
+        output_fields = list(dict.fromkeys(input_fields + FIELDS))
+        with open(args.output, "w", newline="", encoding="utf-8-sig") as handle:
+            writer = csv.DictWriter(handle, fieldnames=output_fields, extrasaction="ignore")
+            writer.writeheader()
+            for index, row in enumerate(input_rows, start=1):
+                approved = str(row.get("Website Approved", "")).strip().lower() in {"yes", "y", "true", "1", "approved"}
+                website = (row.get("Website") or "").strip()
+                if not approved or not website.startswith(("http://", "https://")):
+                    row["Lead Status"] = "Website candidate held for review; not crawled"
+                    row["Review Notes"] = "Review the official company URL, put it in Website, and set Website Approved=YES before contact-page crawling."
+                else:
+                    print(f"[{index}/{len(input_rows)}] Crawling approved site: {website}", flush=True)
+                    details = crawl_approved_website(website, session)
+                    row["Website"] = details.get("website", website)
+                    row["Lead Status"] = details.get("status", "Crawl completed")
+                    if details.get("email"):
+                        row["Business Email"] = details["email"]
+                        row["Email Candidate for Review"] = details["email"]
+                        row["Email Candidate Source URL"] = details["email_source"]
+                    if details.get("phone"):
+                        row["Phone"] = details["phone"]
+                        row["Phone Candidate for Review"] = details["phone"]
+                        row["Phone Source URL"] = details["phone_source"]
+                    if details.get("name"):
+                        parts = details["name"].split()
+                        row["First Name"] = parts[0]
+                        row["Last Name"] = " ".join(parts[1:])
+                        row["Contact Name Candidate"] = details["name"]
+                        row["Contact Name Source URL"] = details["name_source"]
+                    row["Review Notes"] = "Public details extracted from the manually approved website; verify the contact role and accuracy before outreach."
+                writer.writerow(row)
+                handle.flush()
+                time.sleep(args.delay)
+        print(f"Processed {len(input_rows)} input rows; saved contacts to {args.output}.", flush=True)
+        return
+
     rows = []
     seen_hosts = set()
     search_errors = 0
@@ -366,17 +411,24 @@ def main():
                             "Website": "",
                             "Website Candidate for Review": url,
                             "Website Approved": "NO",
+                            "First Name": "",
+                            "Last Name": "",
+                            "Contact Name Candidate": "",
+                            "Contact Name Source URL": "",
                             "Business Email": "",
                             "Email Candidate for Review": email_candidate,
                             "Email Candidate Source URL": url if email_candidate else "",
                             "Phone": "",
+                            "Phone Candidate for Review": "",
+                            "Phone Source URL": "",
                             "Lead Source URL": url,
                             "Search Evidence": body.strip(),
                             "Lead Status": "Unverified search result — manual review required",
                             "Review Notes": (
                                 "Search location is a query hint, not a verified business address. "
-                                "Confirm the business, city/state, official website, email and relevance "
-                                "before outreach. Search-result email is a candidate, not a verified contact."
+                                "Confirm the business, city/state and official website. To extract public "
+                                "contacts, review the candidate URL, copy it into Website, and set "
+                                "Website Approved=YES. Search-result contact details remain candidates."
                             ),
                         })
                         found += 1
@@ -392,7 +444,7 @@ def main():
         writer.writerows(rows)
     print(f"Search summary: {successful_searches} successful queries, {empty_searches} empty queries, {search_errors} consecutive provider error(s).", flush=True)
     print(f"Saved {len(rows)} unverified business leads to {args.output}.", flush=True)
-    print("Review candidates manually; no unapproved website was crawled.", flush=True)
+    print("Review candidates manually; no unapproved website was crawled. Use --input on an approved CSV to extract public contacts.", flush=True)
     if len(rows) < args.limit:
         print("Fewer than the requested limit were found. Do not treat the row count as a quality score.", flush=True)
 
