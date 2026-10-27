@@ -24,6 +24,21 @@ class BusinessLeadDiscoveryTests(unittest.TestCase):
             "Alabama Restaurant Association", "Membership information",
             "https://example.org/association"))
 
+    def test_roundup_pages_are_rejected(self):
+        self.assertTrue(leads.reject_result(
+            "Top Plumbing Contractors in Montana | USA Plumber",
+            "A list of plumbing contractors in Montana",
+            "https://example.com/top-plumbing-contractors"))
+        self.assertTrue(leads.reject_result(
+            "Best HVAC Contractors in Maryland", "Top rated providers",
+            "https://example.com/best-hvac-contractors"))
+
+    def test_search_errors_are_classified_correctly(self):
+        self.assertEqual(leads.classify_search_error(Exception("No results found.")), "empty")
+        self.assertEqual(leads.classify_search_error(Exception("429 Too Many Requests")), "transient")
+        self.assertEqual(leads.classify_search_error(Exception("connection error detected")), "transient")
+        self.assertEqual(leads.classify_search_error(Exception("unexpected parser issue")), "unknown")
+
     def test_trade_business_result_can_pass_filters(self):
         self.assertFalse(leads.reject_result(
             "Arid Valley Plumbing", "Residential plumbing in Phoenix",
