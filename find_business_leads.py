@@ -8,8 +8,11 @@ import csv
 import random
 import re
 import time
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
+from urllib.robotparser import RobotFileParser
 
+import requests
+from bs4 import BeautifulSoup
 from ddgs import DDGS
 
 INDUSTRIES = [
@@ -49,11 +52,17 @@ NON_BUSINESS_TITLE_TERMS = (
     "membership", "get involved", "tax credits", "research us manufacturers",
 )
 EMAIL_RE = re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.I)
+PHONE_RE = re.compile(r"(?<!\w)(?:\+?1[ .-]?)?(?:\(?\d{3}\)?[ .-]?)\d{3}[ .-]?\d{4}(?!\w)")
+USER_AGENT = "BusinessContactResearchBot/1.0 (public business contact research)"
+HEADERS = {"User-Agent": USER_AGENT}
+CONTACT_TERMS = ("contact", "about", "team", "leadership", "staff", "owner", "management")
 FIELDS = [
     "Business Name", "Industry", "City", "State", "Search State",
     "Website", "Website Candidate for Review", "Website Approved",
+    "First Name", "Last Name", "Contact Name Candidate", "Contact Name Source URL",
     "Business Email", "Email Candidate for Review", "Email Candidate Source URL",
-    "Phone", "Lead Source URL", "Search Evidence", "Lead Status", "Review Notes",
+    "Phone", "Phone Candidate for Review", "Phone Source URL",
+    "Lead Source URL", "Search Evidence", "Lead Status", "Review Notes",
 ]
 
 
