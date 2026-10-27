@@ -4,7 +4,7 @@ import csv
 import re
 import time
 from pathlib import Path
-from urllib.parse import urljoin, urlparse
+from urllib.parse import unquote, urljoin, urlparse
 from urllib.robotparser import RobotFileParser
 
 import requests
@@ -18,10 +18,12 @@ BLOCKED_DOMAINS = (
     "facebook.com", "linkedin.com", "yelp.com", "mapquest.com",
     "yellowpages.com", "instagram.com", "youtube.com", "medicare.gov",
     "cms.gov", "healthgrades.com", "care.com", "bbb.org", "webmd.com",
-    "angi.com", "nextdoor.com", "wikipedia.org",
+    "angi.com", "nextdoor.com", "wikipedia.org", "npino.com",
 )
 CONTACT_TERMS = ("contact", "about", "leadership", "team", "owner", "location")
 BAD_EMAIL_PARTS = ("example.com", "email.com", "sentry.io", "wixpress.com")
+BLOCKED_EMAIL_DOMAINS = ("npino.com", "example.com")
+LOW_PRIORITY_EMAIL_TERMS = ("media@", "press@", "marketing@", "feedback@", "webmaster@", "noreply@", "no-reply@", "donotreply@", "privacy@", "billing@", "careers@", "jobs@")
 
 
 def normalized_host(url):
@@ -92,7 +94,13 @@ def extract_emails(html):
     candidates.update(EMAIL_RE.findall(soup.get_text(" ", strip=True)))
     clean = set()
     for email in candidates:
-        email = email.strip(".,;:()[]{}<>").lower()
+        # Decode URL-encoded whitespace/noise before validating the address.
+        email = unquote(email).strip().strip(".,;:()[]{}<>").lower()
+        if not EMAIL_RE.fullmatch(email):
+            continue
+        email_domain = email.rsplit("@", 1)[-1]
+        if any(email_domain == domain or email_domain.endswith("." + domain) for domain in BLOCKED_EMAIL_DOMAINS):
+            continue
         if any(bad in email for bad in BAD_EMAIL_PARTS):
             continue
         if email.endswith((".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".css", ".js")):
@@ -151,13 +159,26 @@ def research_agency(agency, session):
             found.append((email, final_url))
         time.sleep(0.4)
 
-    preferred = ("info@", "contact@", "office@", "hello@", "admin@", "inquiries@", "enquiries@")
+    preferred = ("info@", "contact@", "office@", "hello@", "admin@", "inquiries@", "enquiries@", "service@", "customerservice@")
     found = list(dict.fromkeys(found))
-    found.sort(key=lambda item: (
-        0 if item[0].startswith(preferred) else 1,
-        1 if any(x in item[0] for x in ("noreply@", "no-reply@", "donotreply@")) else 0,
-        item[0],
-    ))
+
+    def email_score(item):
+        email = item[0]
+        local = email.split("@", 1)[0]
+        host = normalized_host(final_home)
+        email_domain = email.rsplit("@", 1)[-1]
+        score = 0
+        if email.startswith(preferred):
+            score += 30
+        if email_domain == host or email_domain.endswith("." + host) or host.endswith("." + email_domain):
+            score += 20
+        if any(term in email for term in LOW_PRIORITY_EMAIL_TERMS):
+            score -= 50
+        if any(term in local for term in ("owner", "founder", "director", "administrator")):
+            score += 5
+        return score
+
+    found.sort(key=lambda item: (-email_score(item), item[0]))
     if found:
         agency["Business Email"] = found[0][0]
         agency["Email Source URL"] = found[0][1]
