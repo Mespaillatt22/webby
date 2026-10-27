@@ -33,6 +33,18 @@ class BusinessLeadDiscoveryTests(unittest.TestCase):
             "Best HVAC Contractors in Maryland", "Top rated providers",
             "https://example.com/best-hvac-contractors"))
 
+    def test_category_listing_and_license_pages_are_rejected(self):
+        examples = [
+            ("Plumbers in Montana | 212 Verified Listings ...", "https://example.com/listings"),
+            ("Plumbers in Idaho: License Rules & Local Listings", "https://example.com/rules"),
+            ("License Lookup - Virginia Interactive", "https://example.com/license"),
+            ("Find Plumbing Contractors in New Jersey - Procore", "https://example.com/find"),
+            ("Kentucky Plumbing License - License Lookup", "https://example.com/lookup"),
+        ]
+        for title, url in examples:
+            with self.subTest(title=title):
+                self.assertTrue(leads.reject_result(title, "provider information", url))
+
     def test_search_errors_are_classified_correctly(self):
         self.assertEqual(leads.classify_search_error(Exception("No results found.")), "empty")
         self.assertEqual(leads.classify_search_error(Exception("429 Too Many Requests")), "transient")
