@@ -1,7 +1,7 @@
-"""Discover candidate small-business leads across industries.
+"""Discover small-business leads and extract public contacts from approved sites.
 
-Search results are unverified research leads. This script does not crawl
-candidate websites and does not treat search-result emails as approved contacts.
+Search results are unverified research leads. Candidate websites are not crawled
+unless the user explicitly approves the website in the input CSV.
 """
 import argparse
 import csv
@@ -207,14 +207,14 @@ def extract_public_contacts(html):
     phones = []
     for link in soup.select('a[href^="tel:"]'):
         raw = link.get("href", "")[4:].strip()
-        if len(re.sub(r"\\D", "", raw)) in (10, 11):
+        if len(re.sub(r"\D", "", raw)) in (10, 11):
             phones.append(link.get_text(" ", strip=True) or raw)
     for value in PHONE_RE.findall(visible_text):
-        if len(re.sub(r"\\D", "", value)) in (10, 11):
+        if len(re.sub(r"\D", "", value)) in (10, 11):
             phones.append(value.strip())
     clean_phones, seen = [], set()
     for value in phones:
-        digits = re.sub(r"\\D", "", value)
+        digits = re.sub(r"\D", "", value)
         if digits.startswith("1") and len(digits) == 11:
             digits = digits[1:]
         if len(digits) == 10 and digits not in seen:
@@ -223,8 +223,8 @@ def extract_public_contacts(html):
 
     names = []
     patterns = [
-        r"(?i)\\b(?:owner|founder|president|ceo|director|manager|contact person)\\s*[:\\-–]\\s*([A-Z][a-zA-Z'’-]+\\s+[A-Z][a-zA-Z'’-]+)\\b",
-        r"(?i)\\bcontact\\s+([A-Z][a-zA-Z'’-]+\\s+[A-Z][a-zA-Z'’-]+)\\b",
+        r"(?i)\b(?:owner|founder|president|ceo|director|manager|contact person)\s*[:\-–]\s*([A-Z][a-zA-Z'’-]+\s+[A-Z][a-zA-Z'’-]+)\b",
+        r"(?i)\bcontact\s+([A-Z][a-zA-Z'’-]+\s+[A-Z][a-zA-Z'’-]+)\b",
     ]
     for tag in soup.find_all(["a", "h1", "h2", "h3", "p", "span", "div"]):
         label = tag.get_text(" ", strip=True)
