@@ -40,15 +40,15 @@ Without `--refresh-websites`, a usable website already in the input CSV may be r
 
 The separate `find_business_leads.py` script discovers search-result candidates for small businesses in trades, construction, restaurants/catering, auto repair, cleaning/landscaping/pest control, and other small-business categories. It does not require the CMS CSV and does not change the healthcare crawler.
 
-Run a 100-lead pilot:
+Run a 100-lead pilot (use a slower delay to reduce search-provider throttling):
 
-    python find_business_leads.py --limit 100 --delay 1 --output output/general_business_leads_100.csv
+    python find_business_leads.py --limit 100 --delay 2.5 --output output/general_business_leads_100.csv
 
 Limit the pilot to one state if useful:
 
-    python find_business_leads.py --limit 100 --state Pennsylvania --output output/pennsylvania_business_leads_100.csv
+    python find_business_leads.py --limit 100 --state Pennsylvania --delay 2.5 --output output/pennsylvania_business_leads_100.csv
 
-The script rotates through U.S. states for its multi-state pilot and searches public web results. Results are **unverified candidates**, not confirmed businesses or sale opportunities. It leaves approved website and business-email fields blank, does not crawl unapproved websites, and puts any email visible in the search-result snippet into `Email Candidate for Review` with its source URL. Review the website, email, business identity, and relevance manually before outreach. Search results may include irrelevant listings or return fewer than the requested number.
+The script rotates through U.S. states for its multi-state pilot and searches public web results. It filters known directory, government, association, and informational pages, and takes at most one result from each search query to improve geographic spread. Filtering is heuristic and cannot identify every irrelevant result. Results are **unverified candidates**, not confirmed businesses or sale opportunities. The `Search State` field records the location used in the query; it is not proof of the business's actual location. The script leaves approved website and business-email fields blank, does not crawl unapproved websites, and puts any email visible in the search-result snippet into `Email Candidate for Review` with its source URL. Review the website, email, business identity, location, and relevance manually before outreach. Search results may include irrelevant listings or return fewer than the requested number.
 
 ## Key output fields
 
@@ -56,7 +56,7 @@ The script rotates through U.S. states for its multi-state pilot and searches pu
 - `Website Source`: whether the URL came from the input CSV or a fresh search.
 - `Website Review Status`: likely official, plausible match, existing URL to verify, unverified candidate, or no candidate found.
 - `Website Candidate for Review`: low-confidence URL retained for manual review and not automatically crawled.
-- `Business Email` and `Email Source URL`: selected publicly listed email and the page where the selected email was found.
+- `Business Email` and `Email Source URL`: selected publicly listed email and the page where it was found.
 - `Email Quality`: whether the email domain matches the selected website.
 - `Contact Search Status` and `Lead Research Notes`: result and review guidance.
 - `Potential Duplicate`: possible duplicate based on agency name, city, and state.
