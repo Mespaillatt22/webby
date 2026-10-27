@@ -11,6 +11,8 @@ class CandidateSafetyTests(unittest.TestCase):
             "https://carerecords.org/agency/example",
             "https://www.wellness.com/dir/123/home-care/example",
             "https://npiprofile.com/npi/123",
+            "https://www.allbiz.com/business/example-agency",
+            "https://families.care/us/providers/example-agency",
         ):
             with self.subTest(url=url):
                 self.assertFalse(find_contacts.is_candidate_website(url))
