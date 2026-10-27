@@ -13,6 +13,12 @@ from bs4 import BeautifulSoup
 from ddgs import DDGS
 
 EMAIL_RE = re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.I)
+GENERIC_NAME_WORDS = {
+    "home", "health", "care", "agency", "services", "service", "and", "the", "of",
+    "at", "inc", "llc", "corp", "corporation", "company", "center", "centers",
+    "medical", "group", "healthcare", "hospice", "llp", "pllc", "limited",
+    "national", "regional", "community",
+}
 USER_AGENT = "AgencyContactResearchBot/1.3 (public business contact research)"
 HEADERS = {"User-Agent": USER_AGENT}
 BLOCKED_DOMAINS = (
