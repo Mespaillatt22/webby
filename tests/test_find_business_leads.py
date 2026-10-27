@@ -4,7 +4,7 @@ import find_business_leads as leads
 
 
 class BusinessLeadDiscoveryTests(unittest.TestCase):
-    def test_directory_domains_are_rejected(self):
+    def test_directory_and_non_business_hosts_are_rejected(self):
         self.assertTrue(leads.blocked("https://www.yelp.com/biz/example"))
         self.assertTrue(leads.blocked("https://www.manta.com/c/example"))
         self.assertTrue(leads.blocked("https://agency.gov/contact"))
@@ -24,7 +24,7 @@ class BusinessLeadDiscoveryTests(unittest.TestCase):
             "Alabama Restaurant Association", "Membership information",
             "https://example.org/association"))
 
-    def test_business_candidate_is_not_rejected_only_for_being_a_trade(self):
+    def test_trade_business_result_can_pass_filters(self):
         self.assertFalse(leads.reject_result(
             "Arid Valley Plumbing", "Residential plumbing in Phoenix",
             "https://aridvalleyplumbing.example/contact"))
@@ -36,16 +36,23 @@ class BusinessLeadDiscoveryTests(unittest.TestCase):
         self.assertGreaterEqual(len(leads.STATES), 50)
         self.assertIn("Pennsylvania", leads.STATES)
 
+    def test_state_rotation_is_repeatable_and_varies_by_industry(self):
+        first = leads.state_order_for(0)
+        second = leads.state_order_for(1)
+        self.assertEqual(first, leads.state_order_for(0))
+        self.assertEqual(len(first), len(set(first)))
+        self.assertNotEqual(first[0], second[0])
+        self.assertEqual(leads.state_order_for(0, "Pennsylvania"), ["Pennsylvania"])
+
     def test_email_is_candidate_not_approved_contact(self):
-        email = "hello@exampleplumbing.com"
         row = {
             "Business Email": "",
-            "Email Candidate for Review": email,
+            "Email Candidate for Review": "hello@exampleplumbing.com",
             "Website": "",
             "Website Approved": "NO",
         }
         self.assertEqual(row["Business Email"], "")
-        self.assertEqual(row["Email Candidate for Review"], email)
+        self.assertTrue(row["Email Candidate for Review"])
         self.assertEqual(row["Website"], "")
         self.assertEqual(row["Website Approved"], "NO")
 
