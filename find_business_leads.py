@@ -137,9 +137,156 @@ def reject_result(title, body, url):
     return False
 
 
+
+def robots_allowed(url, session):
+    """Check robots.txt before requesting a public page."""
+    parsed = urlparse(url)
+    robots_url = f"{parsed.scheme}://{parsed.netloc}/robots.txt"
+    try:
+        response = session.get(robots_url, timeout=8)
+        if response.status_code == 404:
+            return True
+        if response.ok:
+            parser = RobotFileParser()
+            parser.set_url(robots_url)
+            parser.parse(response.text.splitlines())
+            return parser.can_fetch(USER_AGENT, url)
+    except requests.RequestException:
+        return False
+    return False
+
+
+def fetch_html(url, session):
+    if not url.startswith(("http://", "https://")) or blocked(url):
+        return None
+    if not robots_allowed(url, session):
+        return None
+    try:
+        response = session.get(url, timeout=12, allow_redirects=True)
+        if response.status_code != 200:
+            return None
+        if "text/html" not in response.headers.get("Content-Type", "").lower():
+            return None
+        if blocked(response.url):
+            return None
+        return response.url, response.text
+    except requests.RequestException:
+        return None
+
+
+def contact_pages(home_url, html, max_pages=8):
+    soup = BeautifulSoup(html, "html.parser")
+    pages = [home_url]
+    base_host = host_of(home_url)
+    for link in soup.find_all("a", href=True):
+        label = (link.get_text(" ", strip=True) + " " + link.get("href", "")).lower()
+        if not any(term in label for term in CONTACT_TERMS):
+            continue
+        candidate = urljoin(home_url, link["href"].strip())
+        if (urlparse(candidate).scheme in ("http", "https")
+                and host_of(candidate) == base_host and candidate not in pages):
+            pages.append(candidate)
+        if len(pages) >= max_pages:
+            break
+    return pages
+
+
+def extract_public_contacts(html):
+    """Extract published business emails, phone numbers, and explicitly labelled names."""
+    soup = BeautifulSoup(html, "html.parser")
+    visible_text = soup.get_text(" ", strip=True)
+    emails = set(EMAIL_RE.findall(html))
+    emails.update(EMAIL_RE.findall(visible_text))
+    emails = sorted({
+        value.strip(".,;:()[]{}<>").lower()
+        for value in emails
+        if len(value) <= 254 and ".." not in value
+        and not value.lower().endswith((".png", ".jpg", ".jpeg", ".gif", ".svg", ".css", ".js"))
+    })
+
+    phones = []
+    for link in soup.select('a[href^="tel:"]'):
+        raw = link.get("href", "")[4:].strip()
+        if len(re.sub(r"\\D", "", raw)) in (10, 11):
+            phones.append(link.get_text(" ", strip=True) or raw)
+    for value in PHONE_RE.findall(visible_text):
+        if len(re.sub(r"\\D", "", value)) in (10, 11):
+            phones.append(value.strip())
+    clean_phones, seen = [], set()
+    for value in phones:
+        digits = re.sub(r"\\D", "", value)
+        if digits.startswith("1") and len(digits) == 11:
+            digits = digits[1:]
+        if len(digits) == 10 and digits not in seen:
+            seen.add(digits)
+            clean_phones.append(value)
+
+    names = []
+    patterns = [
+        r"(?i)\\b(?:owner|founder|president|ceo|director|manager|contact person)\\s*[:\\-–]\\s*([A-Z][a-zA-Z'’-]+\\s+[A-Z][a-zA-Z'’-]+)\\b",
+        r"(?i)\\bcontact\\s+([A-Z][a-zA-Z'’-]+\\s+[A-Z][a-zA-Z'’-]+)\\b",
+    ]
+    for tag in soup.find_all(["a", "h1", "h2", "h3", "p", "span", "div"]):
+        label = tag.get_text(" ", strip=True)
+        if len(label) > 120:
+            continue
+        for pattern in patterns:
+            match = re.search(pattern, label)
+            if match:
+                name = match.group(1).strip()
+                if name.lower() not in {"customer service", "general manager"}:
+                    names.append(name)
+    return emails, clean_phones, list(dict.fromkeys(names))
+
+
+def crawl_approved_website(website, session, delay=0.5):
+    """Crawl an explicitly approved company website and same-domain contact pages."""
+    homepage = fetch_html(website, session)
+    if not homepage:
+        return {"status": "Approved website unavailable or crawling disallowed"}
+    final_home, home_html = homepage
+    email_sources, phone_sources, name_sources = {}, {}, {}
+    emails, phones, names = [], [], []
+    for page_url in contact_pages(final_home, home_html, max_pages=8):
+        page = fetch_html(page_url, session)
+        if page:
+            final_url, html = page
+            found_emails, found_phones, found_names = extract_public_contacts(html)
+            for value in found_emails:
+                email_sources.setdefault(value, final_url)
+                emails.append(value)
+            for value in found_phones:
+                phone_sources.setdefault(value, final_url)
+                phones.append(value)
+            for value in found_names:
+                name_sources.setdefault(value, final_url)
+                names.append(value)
+            time.sleep(delay)
+    host = host_of(final_home)
+    emails = list(dict.fromkeys(emails))
+    emails.sort(key=lambda value: (
+        0 if value.rsplit("@", 1)[-1] == host else 1,
+        0 if value.split("@", 1)[0].lower() in {"info", "contact", "office", "hello", "sales", "inquiries"} else 1,
+        value,
+    ))
+    email = emails[0] if emails else ""
+    phone = list(dict.fromkeys(phones))
+    name = list(dict.fromkeys(names))
+    return {
+        "status": "Public contact pages reviewed",
+        "website": final_home,
+        "email": email,
+        "email_source": email_sources.get(email, ""),
+        "phone": phone[0] if phone else "",
+        "phone_source": phone_sources.get(phone[0], "") if phone else "",
+        "name": name[0] if name else "",
+        "name_source": name_sources.get(name[0], "") if name else "",
+    }
+
 def main():
     parser = argparse.ArgumentParser(description="Discover small-business leads across industries.")
     parser.add_argument("--output", default="general_business_leads_100.csv")
+    parser.add_argument("--input", default="", help="Optional existing leads CSV; crawls only rows with Website Approved=YES.")
     parser.add_argument("--limit", type=int, default=100, help="Maximum leads to collect (default: 100).")
     parser.add_argument("--state", default="", help="Optional state filter; omit for a multi-state U.S. pilot.")
     parser.add_argument("--delay", type=float, default=2.5, help="Delay between search requests in seconds (default: 2.5).")
