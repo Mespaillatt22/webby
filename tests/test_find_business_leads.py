@@ -84,5 +84,32 @@ class BusinessLeadDiscoveryTests(unittest.TestCase):
         self.assertEqual(row["Website Approved"], "NO")
 
 
+    def test_public_contact_extraction_finds_published_email_phone_and_labelled_name(self):
+        html = """
+        <html><body>
+          <p>Owner: Jane Smith</p>
+          <a href="mailto:info@example.com">info@example.com</a>
+          <a href="tel:+1-212-555-0198">(212) 555-0198</a>
+          <p>Office phone: 212-555-0198</p>
+        </body></html>
+        """
+        emails, phones, names = leads.extract_public_contacts(html)
+        self.assertIn("info@example.com", emails)
+        self.assertTrue(any("212" in phone and "555" in phone for phone in phones))
+        self.assertIn("Jane Smith", names)
+
+    def test_contact_pages_stay_on_same_host(self):
+        html = """
+        <html><body>
+          <a href="/contact">Contact</a>
+          <a href="https://other.example/about">About us</a>
+        </body></html>
+        """
+        pages = leads.contact_pages("https://company.example/", html)
+        self.assertIn("https://company.example/", pages)
+        self.assertIn("https://company.example/contact", pages)
+        self.assertFalse(any("other.example" in page for page in pages))
+
+
 if __name__ == "__main__":
     unittest.main()
