@@ -36,6 +36,20 @@ Choose other files:
 
 Without `--refresh-websites`, a usable website already in the input CSV may be reused. With the flag, the script searches again.
 
+## Multi-industry business discovery pilot
+
+The separate `find_business_leads.py` script discovers search-result candidates for small businesses in trades, construction, restaurants/catering, auto repair, cleaning/landscaping/pest control, and other small-business categories. It does not require the CMS CSV and does not change the healthcare crawler.
+
+Run a 100-lead pilot (use a slower delay to reduce search-provider throttling):
+
+    python find_business_leads.py --limit 100 --delay 2.5 --output output/general_business_leads_100.csv
+
+Limit the pilot to one state if useful:
+
+    python find_business_leads.py --limit 100 --state Pennsylvania --delay 2.5 --output output/pennsylvania_business_leads_100.csv
+
+The script rotates through U.S. states for its multi-state pilot and searches public web results. It filters known directory, government, association, and informational pages, and takes at most one result from each search query to improve geographic spread. Filtering is heuristic and cannot identify every irrelevant result. Results are **unverified candidates**, not confirmed businesses or sale opportunities. The `Search State` field records the location used in the query; it is not proof of the business's actual location. The script leaves approved website and business-email fields blank, does not crawl unapproved websites, and puts any email visible in the search-result snippet into `Email Candidate for Review` with its source URL. Review the website, email, business identity, location, and relevance manually before outreach. Search results may include irrelevant listings or return fewer than the requested number.
+
 ## Key output fields
 
 - `Website`: candidate website selected for crawling when confidence is adequate.
